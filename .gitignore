@@ -1,2 +1,4 @@
 .env
-.index/.bin/.npy
+.index
+.bin
+.npy
