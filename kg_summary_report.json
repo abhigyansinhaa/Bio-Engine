@@ -1,0 +1,43 @@
+{
+  "total_triples": 6319,
+  "unique_subjects": 2903,
+  "unique_predicates": 2000,
+  "unique_objects": 4677,
+  "unique_papers": 19,
+  "top_subjects": {
+    "sars-cov-2": 109,
+    "covid-19": 96,
+    "sars-cov-2 infection": 91,
+    "spaceflight": 79,
+    "plants": 39,
+    "lh evs": 38,
+    "omg1": 37,
+    "microgravity": 33,
+    "cip": 33,
+    "issop": 32
+  },
+  "top_predicates": {
+    "causes": 440,
+    "has": 95,
+    "affects": 89,
+    "enriches": 84,
+    "include": 71,
+    "is": 67,
+    "regulates": 52,
+    "is a": 51,
+    "is associated with": 48,
+    "are": 44
+  },
+  "top_objects": {
+    "sars-cov-2": 24,
+    "microgravity": 23,
+    "space": 21,
+    "spaceflight": 20,
+    "ir at 7 days": 20,
+    "hlu + ir": 14,
+    "hlu + ir at 1 month": 14,
+    "ir": 13,
+    "hlu at 7 days": 12,
+    "international space station": 11
+  }
+}
