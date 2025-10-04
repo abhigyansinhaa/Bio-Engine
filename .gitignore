@@ -1,4 +1,11 @@
+# Environment files
 .env
-.index
-.bin
-.npy
+
+# FAISS / model artifacts
+*.index
+*.bin
+*.npy
+
+# Caches / temp
+__pycache__/
+*.pyc
