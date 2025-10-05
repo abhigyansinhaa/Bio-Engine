@@ -67,45 +67,52 @@ class HealthResponse(BaseModel):
 
 # ---------------------- STARTUP ----------------------
 
-@app.on_event("startup")
-async def startup_event():
+def load_resources_lazy():
+    """Lazy load model and index only when first needed (saves memory on startup)"""
     global model, index, dataset, metadata
-    logger.info("🚀 Booting Bio Engine API...")
-
-    try:
-        # 1. Load model
+    
+    if model is None:
+        logger.info(f"Loading model: {EMBEDDING_MODEL}...")
         model = SentenceTransformer(EMBEDDING_MODEL)
         logger.info(f"✓ Model loaded: {EMBEDDING_MODEL}")
-
-        # 2. Check if FAISS index exists
-        if not os.path.exists(FAISS_INDEX_FILE):
-            logger.warning("⚠️ FAISS index not found!")
-            logger.warning(f"   Missing file: {FAISS_INDEX_FILE}")
-            logger.warning("   Run 'python semanticSearchBuilder.py' to build the index.")
-            logger.warning("   API will start but search will not work until index is uploaded.")
-            return
-        
-        if not os.path.exists(METADATA_FILE):
-            logger.warning(f"⚠️ Metadata file not found: {METADATA_FILE}")
-            return
-            
-        if not os.path.exists(DATASET_FILE):
-            logger.warning(f"⚠️ Dataset file not found: {DATASET_FILE}")
-            return
-
-        # 3. Load index + metadata
+    
+    if index is None and os.path.exists(FAISS_INDEX_FILE):
+        logger.info("Loading FAISS index and dataset...")
         index = faiss.read_index(FAISS_INDEX_FILE)
         with open(METADATA_FILE, "r", encoding="utf-8") as f:
             metadata = json.load(f)
         with open(DATASET_FILE, "r", encoding="utf-8") as f:
             dataset = json.load(f)
+        logger.info(f"✓ Index loaded ({index.ntotal} vectors, {len(dataset)} chunks)")
+    
+    return model is not None and index is not None
 
-        logger.info(f"✓ Index loaded ({index.ntotal} vectors)")
-        logger.info(f"✓ Dataset loaded ({len(dataset)} chunks)")
-        logger.info("✅ System ready for search!")
+@app.on_event("startup")
+async def startup_event():
+    """Quick startup check (no heavy loading to save memory)"""
+    global model, index, dataset, metadata
+    logger.info("🚀 Booting Bio Engine API...")
+    logger.info("💡 Using lazy loading to reduce memory footprint")
+
+    try:
+        # Just check if files exist (don't load yet)
+        files_exist = all([
+            os.path.exists(FAISS_INDEX_FILE),
+            os.path.exists(METADATA_FILE),
+            os.path.exists(DATASET_FILE)
+        ])
+        
+        if not files_exist:
+            logger.warning("⚠️ Data files not found - search will not work")
+            logger.warning(f"   Missing: {FAISS_INDEX_FILE}, {METADATA_FILE}, or {DATASET_FILE}")
+            logger.warning("   Build locally: python semanticSearchBuilder.py")
+        else:
+            logger.info("✓ Data files detected (will load on first search)")
+            
+        logger.info("✅ API ready - resources will load on demand")
 
     except Exception as e:
-        logger.error(f"Startup failed: {e}")
+        logger.error(f"Startup check failed: {e}")
 
 # ---------------------- ROUTES ----------------------
 
@@ -131,8 +138,16 @@ async def health_check():
 
 @app.post("/search", response_model=SearchResponse)
 async def search_post(request: SearchRequest):
-    if not all([model, index, dataset]):
-        raise HTTPException(status_code=503, detail="Model or index not loaded yet.")
+    # Lazy load resources on first search request
+    try:
+        if not load_resources_lazy():
+            raise HTTPException(
+                status_code=503, 
+                detail="Search unavailable. Required data files not found. Please upload index files or build them locally."
+            )
+    except Exception as e:
+        logger.error(f"Failed to load resources: {e}")
+        raise HTTPException(status_code=503, detail=f"Failed to initialize search: {str(e)}")
 
     try:
         q_emb = model.encode([request.query], convert_to_numpy=True)
