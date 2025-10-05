@@ -332,4 +332,15 @@ async def force_garbage_collection():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api_server:app", host="0.0.0.0", port=8000, reload=True)
+    import os
+
+    # Use Render's dynamic port (or 8000 for local runs)
+    port = int(os.getenv("PORT", 8000))
+
+    # Disable reload for production to reduce memory use
+    uvicorn.run(
+        "api_server:app",
+        host="0.0.0.0",
+        port=port,
+        reload=bool(os.getenv("DEBUG", False))
+    )
