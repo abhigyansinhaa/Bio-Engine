@@ -13,6 +13,7 @@ from sentence_transformers import SentenceTransformer
 import logging
 import psutil
 import gc
+import requests
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -38,7 +39,6 @@ app.add_middleware(
 # Custom exception handler for validation errors
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    # Log the validation error details
     logger.error(f"Validation error for {request.method} {request.url}")
     logger.error(f"Error details: {exc.errors()}")
     try:
@@ -94,54 +94,117 @@ class HealthResponse(BaseModel):
     model_loaded: bool
     total_chunks: int
 
+# ---------------------- FILE DOWNLOAD ----------------------
+
+def download_file_from_url(url: str, destination: str) -> bool:
+    """Download file from URL if it doesn't exist locally"""
+    if not url:
+        logger.info(f"No URL provided for {destination}, skipping download")
+        return False
+        
+    if os.path.exists(destination):
+        logger.info(f"File already exists: {destination}")
+        return True
+    
+    try:
+        logger.info(f"Downloading {destination} from {url}...")
+        response = requests.get(url, stream=True, timeout=600)
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded = 0
+        
+        with open(destination, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                downloaded += len(chunk)
+                f.write(chunk)
+                # Log progress every 10MB
+                if downloaded % (10 * 1024 * 1024) == 0:
+                    if total_size > 0:
+                        progress = (downloaded / total_size) * 100
+                        logger.info(f"Downloaded {downloaded / (1024*1024):.1f}MB / {total_size / (1024*1024):.1f}MB ({progress:.1f}%)")
+                    else:
+                        logger.info(f"Downloaded {downloaded / (1024*1024):.1f}MB")
+        
+        logger.info(f"Successfully downloaded {destination} ({downloaded / (1024*1024):.1f}MB)")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to download {destination}: {e}")
+        if os.path.exists(destination):
+            os.remove(destination)  # Clean up partial download
+        return False
+
 # ---------------------- STARTUP ----------------------
 
 def load_resources_lazy():
-    """Lazy load model and index only when first needed (saves memory on startup)"""
+    """Lazy load model and index only when first needed"""
     global model, index, dataset, metadata
     
     if model is None:
         logger.info(f"Loading model: {EMBEDDING_MODEL}...")
         model = SentenceTransformer(EMBEDDING_MODEL)
-        logger.info(f"✓ Model loaded: {EMBEDDING_MODEL}")
+        logger.info(f"Model loaded: {EMBEDDING_MODEL}")
     
     if index is None and os.path.exists(FAISS_INDEX_FILE):
-        logger.info("Loading FAISS index and dataset...")
+        logger.info("Loading FAISS index...")
         index = faiss.read_index(FAISS_INDEX_FILE)
+        logger.info(f"Index loaded ({index.ntotal} vectors)")
+        
+    if metadata is None and os.path.exists(METADATA_FILE):
+        logger.info("Loading metadata...")
         with open(METADATA_FILE, "r", encoding="utf-8") as f:
             metadata = json.load(f)
+        logger.info(f"Metadata loaded ({len(metadata)} entries)")
+        
+    if dataset is None and os.path.exists(DATASET_FILE):
+        logger.info("Loading dataset...")
         with open(DATASET_FILE, "r", encoding="utf-8") as f:
             dataset = json.load(f)
-        logger.info(f"✓ Index loaded ({index.ntotal} vectors, {len(dataset)} chunks)")
+        logger.info(f"Dataset loaded ({len(dataset)} chunks)")
     
     return model is not None and index is not None
 
 @app.on_event("startup")
 async def startup_event():
-    """Quick startup check (no heavy loading to save memory)"""
+    """Startup with file download capability"""
     global model, index, dataset, metadata
+    
     logger.info("🚀 Booting Bio Engine API...")
-    logger.info("💡 Using lazy loading to reduce memory footprint")
-
-    try:
-        # Just check if files exist (don't load yet)
-        files_exist = all([
-            os.path.exists(FAISS_INDEX_FILE),
-            os.path.exists(METADATA_FILE),
-            os.path.exists(DATASET_FILE)
-        ])
-        
-        if not files_exist:
-            logger.warning("⚠️ Data files not found - search will not work")
-            logger.warning(f"   Missing: {FAISS_INDEX_FILE}, {METADATA_FILE}, or {DATASET_FILE}")
-            logger.warning("   Build locally: python semanticSearchBuilder.py")
-        else:
-            logger.info("✓ Data files detected (will load on first search)")
-            
-        logger.info("✅ API ready - resources will load on demand")
-
-    except Exception as e:
-        logger.error(f"Startup check failed: {e}")
+    
+    # Download data files from cloud storage if URLs are provided
+    # Set these as environment variables in Railway
+    data_files = {
+        FAISS_INDEX_FILE: os.getenv("FAISS_INDEX_URL", ""),
+        METADATA_FILE: os.getenv("METADATA_URL", ""),
+        DATASET_FILE: os.getenv("DATASET_URL", "")
+    }
+    
+    logger.info("Checking for remote data files...")
+    for filename, url in data_files.items():
+        if url:
+            download_file_from_url(url, filename)
+        elif not os.path.exists(filename):
+            logger.warning(f"File not found and no URL provided: {filename}")
+    
+    # Check which files are available
+    files_exist = {
+        "index": os.path.exists(FAISS_INDEX_FILE),
+        "metadata": os.path.exists(METADATA_FILE),
+        "dataset": os.path.exists(DATASET_FILE)
+    }
+    
+    logger.info(f"Files available: {files_exist}")
+    
+    if not all(files_exist.values()):
+        logger.warning("⚠️  Some data files not found - search may not work properly")
+        logger.warning("   Upload files to cloud storage and set environment variables:")
+        logger.warning("   - FAISS_INDEX_URL")
+        logger.warning("   - METADATA_URL")
+        logger.warning("   - DATASET_URL")
+    else:
+        logger.info("✓ All data files available (will load on first search)")
+    
+    logger.info("✅ API ready - resources will load on demand")
 
 # ---------------------- ROUTES ----------------------
 
@@ -167,14 +230,14 @@ async def health_check():
 
 @app.post("/search", response_model=SearchResponse)
 async def search_post(request: SearchRequest):
-    logger.info(f"Search request received: query='{request.query}', k={request.k}")
+    logger.info(f"Search request: query='{request.query}', k={request.k}")
     
-    # Lazy load resources on first search request
+    # Lazy load resources on first search
     try:
         if not load_resources_lazy():
             raise HTTPException(
-                status_code=503, 
-                detail="Search unavailable. Required data files not found. Please upload index files or build them locally."
+                status_code=503,
+                detail="Search unavailable. Required data files not found. Set FAISS_INDEX_URL, METADATA_URL, and DATASET_URL environment variables."
             )
     except Exception as e:
         logger.error(f"Failed to load resources: {e}")
@@ -201,7 +264,7 @@ async def search_post(request: SearchRequest):
                 word_count=chunk.get("word_count"),
             ))
 
-        logger.info(f"🔍 Query: '{request.query}' → {len(results)} results")
+        logger.info(f"Query '{request.query}' returned {len(results)} results")
         return SearchResponse(query=request.query, total_results=len(results), results=results)
 
     except Exception as e:
@@ -221,21 +284,17 @@ async def get_memory_stats():
         process = psutil.Process()
         memory_info = process.memory_info()
         memory_percent = process.memory_percent()
-        
-        # Get system memory
         system_memory = psutil.virtual_memory()
         
         return {
             "process": {
-                "rss_mb": round(memory_info.rss / 1024 / 1024, 2),  # Resident Set Size
-                "vms_mb": round(memory_info.vms / 1024 / 1024, 2),  # Virtual Memory Size
+                "rss_mb": round(memory_info.rss / 1024 / 1024, 2),
+                "vms_mb": round(memory_info.vms / 1024 / 1024, 2),
                 "percent": round(memory_percent, 2),
-                "available_mb": round(system_memory.available / 1024 / 1024, 2),
             },
             "system": {
                 "total_mb": round(system_memory.total / 1024 / 1024, 2),
-                "used_mb": round(system_memory.used / 1024 / 1024, 2),
-                "free_mb": round(system_memory.free / 1024 / 1024, 2),
+                "available_mb": round(system_memory.available / 1024 / 1024, 2),
                 "percent": round(system_memory.percent, 2),
             },
             "resources_loaded": {
@@ -251,7 +310,7 @@ async def get_memory_stats():
 
 @app.post("/gc")
 async def force_garbage_collection():
-    """Force garbage collection (useful for clearing unused memory)"""
+    """Force garbage collection"""
     try:
         before = psutil.Process().memory_info().rss / 1024 / 1024
         collected = gc.collect()
@@ -267,39 +326,6 @@ async def force_garbage_collection():
         }
     except Exception as e:
         logger.error(f"GC error: {e}")
-        return {"error": str(e)}
-
-@app.get("/stats")
-async def get_system_stats():
-    """Get comprehensive system statistics"""
-    try:
-        process = psutil.Process()
-        memory_info = process.memory_info()
-        
-        # CPU times
-        cpu_times = process.cpu_times()
-        
-        return {
-            "uptime_seconds": round(process.create_time(), 2),
-            "cpu": {
-                "percent": round(process.cpu_percent(interval=0.1), 2),
-                "user_time": round(cpu_times.user, 2),
-                "system_time": round(cpu_times.system, 2),
-            },
-            "memory": {
-                "rss_mb": round(memory_info.rss / 1024 / 1024, 2),
-                "percent": round(process.memory_percent(), 2),
-            },
-            "threads": process.num_threads(),
-            "open_files": len(process.open_files()) if hasattr(process, 'open_files') else 0,
-            "resources_loaded": {
-                "model": model is not None,
-                "index": index is not None,
-                "dataset_size": len(dataset) if dataset else 0,
-            }
-        }
-    except Exception as e:
-        logger.error(f"Stats error: {e}")
         return {"error": str(e)}
 
 # ---------------------- MAIN ----------------------
