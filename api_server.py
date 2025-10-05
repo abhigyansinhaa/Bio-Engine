@@ -81,8 +81,8 @@ async def startup_event():
         if not os.path.exists(FAISS_INDEX_FILE):
             logger.warning("⚠️ Index not found — building automatically...")
             try:
-                import build_and_query_chunks_faiss_optimized as builder
-                builder.build_faiss_index_optimized()
+                import semanticSearchBuilder as builder
+                builder.build_index()
                 logger.info("✓ Index built successfully.")
             except Exception as e:
                 logger.error(f"❌ Failed to auto-build FAISS index: {e}")
