@@ -1,6 +1,8 @@
 # api_server.py
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import os
@@ -9,6 +11,8 @@ import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import logging
+import psutil
+import gc
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -30,6 +34,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Custom exception handler for validation errors
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Log the validation error details
+    logger.error(f"Validation error for {request.method} {request.url}")
+    logger.error(f"Error details: {exc.errors()}")
+    try:
+        body = await request.body()
+        logger.error(f"Request body: {body.decode()}")
+    except:
+        logger.error("Could not read request body")
+    
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": exc.errors(),
+            "body": str(exc.body) if hasattr(exc, 'body') else None,
+            "message": "Request validation failed. Check your JSON format.",
+            "example": {
+                "query": "your search text here",
+                "k": 5
+            }
+        }
+    )
 
 # Globals
 model = None
@@ -138,6 +167,8 @@ async def health_check():
 
 @app.post("/search", response_model=SearchResponse)
 async def search_post(request: SearchRequest):
+    logger.info(f"Search request received: query='{request.query}', k={request.k}")
+    
     # Lazy load resources on first search request
     try:
         if not load_resources_lazy():
@@ -180,6 +211,96 @@ async def search_post(request: SearchRequest):
 @app.get("/search", response_model=SearchResponse)
 async def search_get(query: str, k: int = 5):
     return await search_post(SearchRequest(query=query, k=k))
+
+# ---------------------- MEMORY MONITORING ----------------------
+
+@app.get("/memory")
+async def get_memory_stats():
+    """Get current memory usage statistics"""
+    try:
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        memory_percent = process.memory_percent()
+        
+        # Get system memory
+        system_memory = psutil.virtual_memory()
+        
+        return {
+            "process": {
+                "rss_mb": round(memory_info.rss / 1024 / 1024, 2),  # Resident Set Size
+                "vms_mb": round(memory_info.vms / 1024 / 1024, 2),  # Virtual Memory Size
+                "percent": round(memory_percent, 2),
+                "available_mb": round(system_memory.available / 1024 / 1024, 2),
+            },
+            "system": {
+                "total_mb": round(system_memory.total / 1024 / 1024, 2),
+                "used_mb": round(system_memory.used / 1024 / 1024, 2),
+                "free_mb": round(system_memory.free / 1024 / 1024, 2),
+                "percent": round(system_memory.percent, 2),
+            },
+            "resources_loaded": {
+                "model": model is not None,
+                "index": index is not None,
+                "dataset": dataset is not None,
+            },
+            "status": "healthy" if memory_percent < 80 else "warning" if memory_percent < 95 else "critical"
+        }
+    except Exception as e:
+        logger.error(f"Memory stats error: {e}")
+        return {"error": str(e)}
+
+@app.post("/gc")
+async def force_garbage_collection():
+    """Force garbage collection (useful for clearing unused memory)"""
+    try:
+        before = psutil.Process().memory_info().rss / 1024 / 1024
+        collected = gc.collect()
+        after = psutil.Process().memory_info().rss / 1024 / 1024
+        freed = before - after
+        
+        return {
+            "collected_objects": collected,
+            "memory_before_mb": round(before, 2),
+            "memory_after_mb": round(after, 2),
+            "memory_freed_mb": round(freed, 2),
+            "message": f"Freed {round(freed, 2)} MB"
+        }
+    except Exception as e:
+        logger.error(f"GC error: {e}")
+        return {"error": str(e)}
+
+@app.get("/stats")
+async def get_system_stats():
+    """Get comprehensive system statistics"""
+    try:
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        
+        # CPU times
+        cpu_times = process.cpu_times()
+        
+        return {
+            "uptime_seconds": round(process.create_time(), 2),
+            "cpu": {
+                "percent": round(process.cpu_percent(interval=0.1), 2),
+                "user_time": round(cpu_times.user, 2),
+                "system_time": round(cpu_times.system, 2),
+            },
+            "memory": {
+                "rss_mb": round(memory_info.rss / 1024 / 1024, 2),
+                "percent": round(process.memory_percent(), 2),
+            },
+            "threads": process.num_threads(),
+            "open_files": len(process.open_files()) if hasattr(process, 'open_files') else 0,
+            "resources_loaded": {
+                "model": model is not None,
+                "index": index is not None,
+                "dataset_size": len(dataset) if dataset else 0,
+            }
+        }
+    except Exception as e:
+        logger.error(f"Stats error: {e}")
+        return {"error": str(e)}
 
 # ---------------------- MAIN ----------------------
 
