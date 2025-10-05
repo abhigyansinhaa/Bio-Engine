@@ -79,49 +79,61 @@ class HealthResponse(BaseModel):
 
 @app.on_event("startup")
 async def startup_event():
-    """Load model and index on startup"""
+    """Load model and index on startup (auto-build if missing)"""
     global model, index, dataset, metadata
-    
+
     try:
-        logger.info("Loading FAISS index and model...")
-        
-        # Check if required files exist
-        if not os.path.exists(FAISS_INDEX_FILE):
-            logger.error(f"FAISS index not found: {FAISS_INDEX_FILE}")
-            logger.error("Please run: python semanticSearchBuilder.py")
-            return
-        
-        if not os.path.exists(METADATA_FILE):
-            logger.error(f"Metadata file not found: {METADATA_FILE}")
-            return
-        
-        if not os.path.exists(DATASET_FILE):
-            logger.error(f"Dataset file not found: {DATASET_FILE}")
-            return
-        
-        # Load FAISS index
-        index = faiss.read_index(FAISS_INDEX_FILE)
-        logger.info(f"✓ FAISS index loaded: {index.ntotal} vectors")
-        
-        # Load metadata
-        with open(METADATA_FILE, 'r', encoding='utf-8') as f:
-            metadata = json.load(f)
-        logger.info(f"✓ Metadata loaded: {len(metadata)} chunks")
-        
-        # Load full dataset (contains text)
-        with open(DATASET_FILE, 'r', encoding='utf-8') as f:
-            dataset = json.load(f)
-        logger.info(f"✓ Dataset loaded: {len(dataset)} chunks")
-        
-        # Load sentence transformer model
+        logger.info("🚀 Starting up Bio Engine Semantic Search API...")
+
+        # Load model first (needed if we must build index)
         model = SentenceTransformer(EMBEDDING_MODEL)
         logger.info(f"✓ Embedding model loaded: {EMBEDDING_MODEL}")
-        
-        logger.info("🚀 Server ready!")
-        
+
+        # Check for FAISS index
+        if not os.path.exists(FAISS_INDEX_FILE):
+            logger.warning(f"⚠️ FAISS index not found: {FAISS_INDEX_FILE}")
+            logger.warning("Attempting to build index automatically...")
+
+            try:
+                import semanticSearchBuilder
+                if hasattr(semanticSearchBuilder, "main"):
+                    semanticSearchBuilder.main()
+                elif hasattr(semanticSearchBuilder, "build_index"):
+                    semanticSearchBuilder.build_index()
+                else:
+                    logger.error("semanticSearchBuilder.py has no main() or build_index() function.")
+            except Exception as e:
+                logger.error(f"Auto-build failed: {e}")
+                logger.error("Please ensure semanticSearchBuilder.py defines a callable build_index() or main()")
+                return
+
+        # Confirm files exist after build attempt
+        if not os.path.exists(FAISS_INDEX_FILE):
+            logger.error(f"❌ Still missing: {FAISS_INDEX_FILE}")
+            return
+        if not os.path.exists(METADATA_FILE):
+            logger.error(f"❌ Missing metadata file: {METADATA_FILE}")
+            return
+        if not os.path.exists(DATASET_FILE):
+            logger.error(f"❌ Missing dataset file: {DATASET_FILE}")
+            return
+
+        # Load FAISS index and metadata
+        index = faiss.read_index(FAISS_INDEX_FILE)
+        with open(METADATA_FILE, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+        with open(DATASET_FILE, 'r', encoding='utf-8') as f:
+            dataset = json.load(f)
+
+        logger.info(f"✓ FAISS index loaded: {index.ntotal} vectors")
+        logger.info(f"✓ Metadata loaded: {len(metadata)} chunks")
+        logger.info(f"✓ Dataset loaded: {len(dataset)} chunks")
+        logger.info("✅ Startup complete, search ready!")
+
     except Exception as e:
-        logger.error(f"Failed to load resources: {e}")
-        logger.error("Server will start but search functionality will not work")
+        logger.error(f"Startup failed: {e}")
+        logger.error("Server will start, but semantic search may not be available.")
+
 
 # Root endpoint
 @app.get("/")
