@@ -40,16 +40,14 @@ def load_chunks():
 
 
 def build_index():
-    """Main FAISS index builder"""
     data = load_chunks()
     n = len(data)
     model = get_model()
 
     print(f"[INFO] Building FAISS index for {n} chunks")
-
-    # Determine embedding dimension
     dim = model.encode(["test"], convert_to_numpy=True).shape[1]
-    embeddings = np.zeros((n, dim), dtype=np.float32)
+
+    index = faiss.IndexFlatIP(dim)
     metadata = []
 
     texts = [d.get("text", "") for d in data]
@@ -57,18 +55,18 @@ def build_index():
         end = min(start + BATCH_SIZE, n)
         batch = texts[start:end]
         batch_emb = model.encode(batch, convert_to_numpy=True, show_progress_bar=False)
-        embeddings[start:end] = batch_emb
+        faiss.normalize_L2(batch_emb)
+        index.add(batch_emb)
         metadata.extend(data[start:end])
+
+        # Free GPU/CPU memory
+        del batch_emb
+        gc.collect()
         if USE_GPU:
             torch.cuda.empty_cache()
 
-    faiss.normalize_L2(embeddings)
-    index = faiss.IndexFlatIP(dim)
-    index.add(embeddings)
-
-    # Save
+    # Save incrementally built index
     faiss.write_index(index, FAISS_INDEX_FILE)
-    np.save(EMBEDDINGS_FILE, embeddings)
     with open(METADATA_FILE, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
 

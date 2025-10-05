@@ -1,4 +1,4 @@
-# server.py
+# api_server.py
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -77,16 +77,21 @@ async def startup_event():
         model = SentenceTransformer(EMBEDDING_MODEL)
         logger.info(f"✓ Model loaded: {EMBEDDING_MODEL}")
 
-        # 2. Ensure FAISS index exists
+        # 2. Check if FAISS index exists
         if not os.path.exists(FAISS_INDEX_FILE):
-            logger.warning("⚠️ Index not found — building automatically...")
-            try:
-                import semanticSearchBuilder as builder
-                builder.build_index()
-                logger.info("✓ Index built successfully.")
-            except Exception as e:
-                logger.error(f"❌ Failed to auto-build FAISS index: {e}")
-                return
+            logger.warning("⚠️ FAISS index not found!")
+            logger.warning(f"   Missing file: {FAISS_INDEX_FILE}")
+            logger.warning("   Run 'python semanticSearchBuilder.py' to build the index.")
+            logger.warning("   API will start but search will not work until index is uploaded.")
+            return
+        
+        if not os.path.exists(METADATA_FILE):
+            logger.warning(f"⚠️ Metadata file not found: {METADATA_FILE}")
+            return
+            
+        if not os.path.exists(DATASET_FILE):
+            logger.warning(f"⚠️ Dataset file not found: {DATASET_FILE}")
+            return
 
         # 3. Load index + metadata
         index = faiss.read_index(FAISS_INDEX_FILE)
@@ -165,4 +170,4 @@ async def search_get(query: str, k: int = 5):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("api_server:app", host="0.0.0.0", port=8000, reload=True)
