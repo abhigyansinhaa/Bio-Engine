@@ -2,9 +2,9 @@
 .env
 
 # FAISS / model artifacts
-*.index
 *.bin
 *.npy
+*.index
 
 # Caches / temp
 __pycache__/
