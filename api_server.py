@@ -108,7 +108,8 @@ def download_file_from_url(url: str, destination: str) -> bool:
     
     try:
         logger.info(f"Downloading {destination} from {url}...")
-        response = requests.get(url, stream=True, timeout=600)
+        # Increase timeout for large files, add connection timeout
+        response = requests.get(url, stream=True, timeout=(30, 900))  # (connect, read) timeouts
         response.raise_for_status()
         
         total_size = int(response.headers.get('content-length', 0))
@@ -116,113 +117,158 @@ def download_file_from_url(url: str, destination: str) -> bool:
         
         with open(destination, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
-                downloaded += len(chunk)
-                f.write(chunk)
-                # Log progress every 10MB
-                if downloaded % (10 * 1024 * 1024) == 0:
-                    if total_size > 0:
-                        progress = (downloaded / total_size) * 100
-                        logger.info(f"Downloaded {downloaded / (1024*1024):.1f}MB / {total_size / (1024*1024):.1f}MB ({progress:.1f}%)")
-                    else:
-                        logger.info(f"Downloaded {downloaded / (1024*1024):.1f}MB")
+                if chunk:  # filter out keep-alive chunks
+                    downloaded += len(chunk)
+                    f.write(chunk)
+                    # Log progress every 10MB
+                    if downloaded % (10 * 1024 * 1024) < 8192:  # Close to 10MB boundary
+                        if total_size > 0:
+                            progress = (downloaded / total_size) * 100
+                            logger.info(f"Downloaded {downloaded / (1024*1024):.1f}MB / {total_size / (1024*1024):.1f}MB ({progress:.1f}%)")
+                        else:
+                            logger.info(f"Downloaded {downloaded / (1024*1024):.1f}MB")
         
-        logger.info(f"Successfully downloaded {destination} ({downloaded / (1024*1024):.1f}MB)")
+        logger.info(f"✓ Successfully downloaded {destination} ({downloaded / (1024*1024):.1f}MB)")
         return True
+    except requests.exceptions.Timeout as e:
+        logger.error(f"Timeout downloading {destination}: {e}")
+        if os.path.exists(destination):
+            os.remove(destination)
+        return False
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error downloading {destination}: {e}")
+        if os.path.exists(destination):
+            os.remove(destination)
+        return False
     except Exception as e:
         logger.error(f"Failed to download {destination}: {e}")
         if os.path.exists(destination):
-            os.remove(destination)  # Clean up partial download
+            os.remove(destination)
         return False
 
 # ---------------------- STARTUP ----------------------
 
 def load_resources_lazy():
-    """Lazy load model and index only when first needed"""
+    """Lazy load model and index only when first needed - includes download on demand"""
     global model, index, dataset, metadata
     
-    if model is None:
-        logger.info(f"Loading model: {EMBEDDING_MODEL}...")
-        model = SentenceTransformer(EMBEDDING_MODEL)
-        logger.info(f"Model loaded: {EMBEDDING_MODEL}")
-    
-    if index is None and os.path.exists(FAISS_INDEX_FILE):
-        logger.info("Loading FAISS index...")
-        index = faiss.read_index(FAISS_INDEX_FILE)
-        logger.info(f"Index loaded ({index.ntotal} vectors)")
-        
-    if metadata is None and os.path.exists(METADATA_FILE):
-        logger.info("Loading metadata...")
-        with open(METADATA_FILE, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
-        logger.info(f"Metadata loaded ({len(metadata)} entries)")
-        
-    if dataset is None and os.path.exists(DATASET_FILE):
-        logger.info("Loading dataset...")
-        with open(DATASET_FILE, "r", encoding="utf-8") as f:
-            dataset = json.load(f)
-        logger.info(f"Dataset loaded ({len(dataset)} chunks)")
-    
-    return model is not None and index is not None
-
-@app.on_event("startup")
-async def startup_event():
-    """Startup with file download capability"""
-    global model, index, dataset, metadata
-    
-    logger.info("🚀 Booting Bio Engine API...")
-    
-    # Download data files from cloud storage if URLs are provided
-    # Set these as environment variables in Railway
+    # Download files if they don't exist and URLs are provided
     data_files = {
         FAISS_INDEX_FILE: os.getenv("FAISS_INDEX_URL", ""),
         METADATA_FILE: os.getenv("METADATA_URL", ""),
         DATASET_FILE: os.getenv("DATASET_URL", "")
     }
     
-    logger.info("Checking for remote data files...")
     for filename, url in data_files.items():
-        if url:
-            download_file_from_url(url, filename)
-        elif not os.path.exists(filename):
-            logger.warning(f"File not found and no URL provided: {filename}")
+        if not os.path.exists(filename) and url:
+            logger.info(f"File not found locally: {filename}, attempting download...")
+            success = download_file_from_url(url, filename)
+            if not success:
+                logger.error(f"Failed to download {filename}")
     
-    # Check which files are available
+    if model is None:
+        logger.info(f"Loading model: {EMBEDDING_MODEL}...")
+        try:
+            model = SentenceTransformer(EMBEDDING_MODEL)
+            logger.info(f"Model loaded: {EMBEDDING_MODEL}")
+        except Exception as e:
+            logger.error(f"Failed to load model: {e}")
+            raise
+    
+    if index is None and os.path.exists(FAISS_INDEX_FILE):
+        logger.info("Loading FAISS index...")
+        try:
+            index = faiss.read_index(FAISS_INDEX_FILE)
+            logger.info(f"Index loaded ({index.ntotal} vectors)")
+        except Exception as e:
+            logger.error(f"Failed to load index: {e}")
+            raise
+        
+    if metadata is None and os.path.exists(METADATA_FILE):
+        logger.info("Loading metadata...")
+        try:
+            with open(METADATA_FILE, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+            logger.info(f"Metadata loaded ({len(metadata)} entries)")
+        except Exception as e:
+            logger.error(f"Failed to load metadata: {e}")
+        
+    if dataset is None and os.path.exists(DATASET_FILE):
+        logger.info("Loading dataset...")
+        try:
+            with open(DATASET_FILE, "r", encoding="utf-8") as f:
+                dataset = json.load(f)
+            logger.info(f"Dataset loaded ({len(dataset)} chunks)")
+        except Exception as e:
+            logger.error(f"Failed to load dataset: {e}")
+    
+    return model is not None and index is not None
+
+@app.on_event("startup")
+async def startup_event():
+    """Fast startup - downloads happen in background"""
+    global model, index, dataset, metadata
+    
+    logger.info("🚀 Booting Bio Engine API...")
+    
+    # Check if files exist locally
     files_exist = {
         "index": os.path.exists(FAISS_INDEX_FILE),
         "metadata": os.path.exists(METADATA_FILE),
         "dataset": os.path.exists(DATASET_FILE)
     }
     
-    logger.info(f"Files available: {files_exist}")
+    logger.info(f"Files available locally: {files_exist}")
     
+    # Only download if files don't exist AND we're not in a timeout-sensitive environment
+    # Downloads will happen on first search request instead
     if not all(files_exist.values()):
-        logger.warning("⚠️  Some data files not found - search may not work properly")
-        logger.warning("   Upload files to cloud storage and set environment variables:")
+        logger.warning("⚠️  Some data files not found locally")
+        logger.warning("   Files will be downloaded on first search request")
+        logger.warning("   Or set environment variables:")
         logger.warning("   - FAISS_INDEX_URL")
         logger.warning("   - METADATA_URL")
         logger.warning("   - DATASET_URL")
     else:
         logger.info("✓ All data files available (will load on first search)")
     
-    logger.info("✅ API ready - resources will load on demand")
+    logger.info("✅ API ready - server started successfully")
+    logger.info("   Resources will load on demand to conserve memory")
 
 # ---------------------- ROUTES ----------------------
 
 @app.get("/")
 async def root():
+    """Root endpoint - used for health checks by Render"""
     return {
+        "status": "online",
         "message": "Bio Engine Semantic Search API",
         "docs": "/docs",
         "health": "/health",
         "search": "/search",
+        "version": "1.0.0"
     }
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    ready = all([model, index, dataset])
+    # Server is healthy if it's running - resources load on demand
+    files_ready = all([
+        os.path.exists(FAISS_INDEX_FILE),
+        os.path.exists(METADATA_FILE),
+        os.path.exists(DATASET_FILE)
+    ])
+    resources_loaded = all([model, index, dataset])
+    
+    status = "healthy" if resources_loaded else ("ready" if files_ready else "starting")
+    message = (
+        "Fully operational" if resources_loaded else
+        "Ready (resources load on first search)" if files_ready else
+        "Server running (data files will download on first search)"
+    )
+    
     return {
-        "status": "healthy" if ready else "unhealthy",
-        "message": "Ready" if ready else "Index/model not loaded",
+        "status": status,
+        "message": message,
         "index_loaded": index is not None,
         "model_loaded": model is not None,
         "total_chunks": len(dataset) if dataset else 0,
