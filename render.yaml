@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: nasa-kg-api
+    env: python
+    plan: free
+    region: singapore
+    buildCommand: "pip install --no-cache-dir fastapi uvicorn pydantic requests psutil && pip install --no-cache-dir sentence-transformers faiss-cpu"
+    startCommand: "uvicorn api_server:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: FAISS_INDEX_URL
+        value: https://drive.google.com/uc?export=download&id=1e7U5y3Bc7ru2tRFEjHe8qTt4e-idCVcB
+      - key: METADATA_URL
+        value: https://drive.google.com/uc?export=download&id=1jyahQXDFRbevtNY3RCblsp7vGJHiNEJl
+      - key: DATASET_URL
+        value: https://drive.google.com/uc?export=download&id=1iI8pQwagonSuZMtG8Tlo5alfH_HZLDdC
